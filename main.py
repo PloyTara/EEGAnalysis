@@ -9,6 +9,7 @@ from cca import analyze_cca
 from fft import analyze_fft
 from fbcca import analyze_fbcca
 from normalization import normalize_data
+from dynamicpsd import analyzed_dynamic_psd
 
 def load_mat_file(path):
     data = scipy.io.loadmat(path)
@@ -26,6 +27,11 @@ def run_analysis():
     threshold_multiplier = float(threshold_entry.get())
     norm_method = norm_var.get()
 
+    window_size = float(window_entry.get())
+    step_size = float(step_entry.get())
+    psd_mode = psd_mode_var.get()
+    nperseg = int(nperseg_entry.get())
+
     selected_channels = [i for i, var in enumerate(channel_vars) if var.get() == 1]
     if not selected_channels:
         messagebox.showwarning("Warning", "กรุณาเลือกอย่างน้อย 1 channel ก่อนเริ่มวิเคราะห์")
@@ -40,13 +46,18 @@ def run_analysis():
     for widget in plot_frame.winfo_children():
         widget.destroy()
 
-    fig, axs = plt.subplots(4, 1, figsize=(10, 9))
+    if psd_mode == 'separate':
+        fig, axs = plt.subplots(4, 1, figsize=(10, 9))
+    else:
+        fig, axs = plt.subplots(5, 1, figsize=(10, 11))
+
     fig.subplots_adjust(top=0.95, bottom=0.05, left=0.1, right=0.95, hspace=0.8)
 
     fft_result, fft_exceed = analyze_fft(data, fs, fft_band, axs[0], x_tick_spacing, selected_channels, threshold_multiplier)
     psd_result, psd_exceed = analyze_psd(data, baseline_data, fs, psd_band, axs[1], x_tick_spacing, threshold_multiplier, selected_channels)
-    cca_result, cca_exceed = analyze_cca(data, baseline_data, fs, cca_band, axs[2], threshold_multiplier, selected_channels)
-    fbcca_result, fbcca_exceed = analyze_fbcca(data, baseline_data, fs, cca_band, axs[3], threshold_multiplier, selected_channels)
+    cca_result, cca_exceed = analyze_cca(data, baseline_data, fs, cca_band, axs[2], threshold_multiplier, selected_channels, x_tick_spacing)
+    fbcca_result, fbcca_exceed = analyze_fbcca(data, baseline_data, fs, fbcca_band, axs[3], threshold_multiplier, selected_channels, x_tick_spacing)
+    dypsd_result, max_freqs = analyzed_dynamic_psd(data, fs, window_size, step_size, psd_band[0], psd_band[1], selected_channels, mode=psd_mode, nperseg=nperseg)
 
     text = ""
     text += f"○ FFT Exceeds Threshold: {', '.join(fft_exceed) if fft_exceed else 'None'}\n"
@@ -65,6 +76,10 @@ def run_analysis():
     for ch, freq in fbcca_result.items():
         text += f" - {ch}: {freq[0]:.2f} Hz (corr={freq[1]:.3f})\n"
 
+    text += f"\no Dynamic PSD Peak Frequencies:\n"
+    for ch, freq in max_freqs:
+        text += f" - {ch}: {freq:02f} Hz\n"
+
     result_label.config(text=text)
 
     plot_canvas = FigureCanvasTkAgg(fig, master=plot_frame)
@@ -73,6 +88,28 @@ def run_analysis():
     plot_canvas.draw()
     plot_frame.update_idletasks()
     canvas.configure(scrollregion=canvas.bbox("all"))
+
+    if psd_mode == 'separate':
+        n_channels = len(dypsd_result)
+        fig_dpsd, axs_dpsd = plt.subplots(n_channels, 1, figsize=(10, 3 * n_channels))
+        if n_channels == 1:
+            axs_dpsd = [axs_dpsd]
+        for i, (freqs, times, matrix) in enumerate(dypsd_result):
+            ax = axs_dpsd[i]
+            ax.pcolormesh(times, freqs, matrix, shading='gouraud', cmap='hot')
+            ax.set_title(f'Dynamic PSD - {max_freqs[i][0]} (Peak: {max_freqs[i][1]:.2f} Hz)')
+            ax.set_xlabel('Time (s)')
+            ax.set_ylabel('Frequency (Hz)')
+        fig_dpsd.tight_layout()
+        plot_canvas2 = FigureCanvasTkAgg(fig_dpsd, master=plot_frame)
+        plot_canvas2.get_tk_widget().pack()
+        plot_canvas2.draw()
+    else:
+        freqs, times, matrix = dypsd_result[0]
+        axs[4].pcolormesh(times, freqs, matrix, shading='gouraud', cmap='hot')
+        axs[4].set_title(f'Dynamic PSD (Average Channels) - Peak: {max_freqs[0][1]:.2f} Hz')
+        axs[4].set_xlabel('Time (s)')
+        axs[4].set_ylabel('Frequency (Hz)')
     
 
 def browse_mat_file():
@@ -137,25 +174,47 @@ threshold_entry = tk.Entry(control_frame)
 threshold_entry.insert(0, "1.5")
 threshold_entry.grid(row=8, column=1)
 
+tk.Label(control_frame, text="Times Domain Setup").grid(row=9, column=0, sticky='e')
+
+tk.Label(control_frame, text="Window Size (s):").grid(row=10, column=0, sticky='e')
+window_entry = tk.Entry(control_frame)
+window_entry.insert(0, "1.0")
+window_entry.grid(row=10, column=1)
+
+tk.Label(control_frame, text="Step Size (s):").grid(row=11, column=0, sticky='e')
+step_entry = tk.Entry(control_frame)
+step_entry.insert(0, "0.25")
+step_entry.grid(row=11, column=1)
+
+tk.Label(control_frame, text="nperseg").grid(row=12, column=0, sticky='e')
+nperseg_entry = tk.Entry(control_frame)
+nperseg_entry.insert(0, "2048")
+nperseg_entry.grid(row=12, column=1)
+
+tk.Label(control_frame, text="Dynamic PSD Mode:").grid(row=13, column=0, sticky='e')
+psd_mode_var = tk.StringVar(value="average")
+psd_mode_menu = tk.OptionMenu(control_frame, psd_mode_var, "average", "separate")
+psd_mode_menu.grid(row=13, column=1, sticky='w')
+
 # Normalization dropdown
-tk.Label(control_frame, text="Normalization:").grid(row=9, column=0, sticky='e')
+tk.Label(control_frame, text="Normalization:").grid(row=14, column=0, sticky='e')
 norm_var = tk.StringVar(value="raw")
 norm_menu = tk.OptionMenu(control_frame, norm_var, "raw", "min-max", "z-score")
-norm_menu.grid(row=9, column=1, sticky='w')
+norm_menu.grid(row=14, column=1, sticky='w')
 
 # Channel selection
-tk.Label(control_frame, text="เลือก Channels (สูงสุด 20):").grid(row=10, column=0, sticky='ne', pady=(10, 0))
+tk.Label(control_frame, text="เลือก Channels (สูงสุด 20):").grid(row=15, column=0, sticky='ne', pady=(10, 0))
 channel_frame = tk.Frame(control_frame)
-channel_frame.grid(row=10, column=1, columnspan=2, sticky='w', pady=(10, 0))
+channel_frame.grid(row=15, column=1, columnspan=2, sticky='w', pady=(10, 0))
 channel_vars = [tk.IntVar(value=1 if i == 0 else 0) for i in range(20)]
 for i in range(20):
     cb = tk.Checkbutton(channel_frame, text=f"Ch {i+1}", variable=channel_vars[i])
     cb.grid(row=i//5, column=i%5, sticky='w')
 
-tk.Button(control_frame, text="เริ่มวิเคราะห์", command=run_analysis).grid(row=11, column=1, pady=10)
+tk.Button(control_frame, text="เริ่มวิเคราะห์", command=run_analysis).grid(row=16, column=1, pady=10)
 
 result_label = tk.Label(control_frame, justify="left", anchor="w")
-result_label.grid(row=12, column=0, columnspan=3, sticky="w")
+result_label.grid(row=17, column=0, columnspan=3, sticky="w")
 
 canvas_frame = tk.Frame(main_frame)
 canvas_frame.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True)

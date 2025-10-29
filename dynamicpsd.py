@@ -1,81 +1,44 @@
 import numpy as np
-from scipy.signal import welch
 import matplotlib.pyplot as plt
+from scipy.signal import welch
 
-def analyze_dynamic_psd(data, baseline_data, fs, freq_band, ax, x_tick_spacing, threshold_multiplier, selected_channels):
-    results = {}
-    exceed_channels = []
+def analyzed_dynamic_psd(data, fs, window_size=1.0, step_size=0.25, freq_min=2,freq_max=50, selected_channels=None, mode='average', nperseg=2048):
+    samples_per_win = int(window_size * fs)
+    sample_step = int(step_size * fs)
+    n_windows = int((data.shape[0] - samples_per_win) / sample_step) + 1
 
-    window_size = fs * 2
-    step_size = fs // 2
+    if selected_channels is None:
+        selected_channels = list(range(data.shape[1]))
 
-    for ch in selected_channels:
-        ch_data = data[ch, :]
-        base_data = baseline_data[ch, :]
+    if mode == 'average':
+        data_proc = np.mean(data[:, selected_channels], axis=1, keepdims=True)
+        channel_labels = ['Average']
+    else:
+        data_proc = data[:, selected_channels]
+        channel_labels = [f"Ch {ch+1}" for ch in selected_channels]
 
-        # ✅ Zero-pad ถ้าข้อมูลไม่พอ
-        if len(ch_data) < window_size:
-            pad_width = window_size - len(ch_data)
-            ch_data = np.pad(ch_data, (0, pad_width), 'constant')
+    psd_all = []
+    max_freqs = []
 
-        if len(base_data) < window_size:
-            pad_width = window_size - len(base_data)
-            base_data = np.pad(base_data, (0, pad_width), 'constant')
+    for ch_idx in range(data_proc.shape[1]):
+        psd_matrix = []
+        time_points = []
 
-        times, powers = [], []
-        freqs = None
+        for i in range(n_windows):
+            start = i * sample_step
+            end = start + samples_per_win
+            segment = data[start:end, ch_idx]
+            freqs, psd = welch(segment, fs=fs, nperseg=min(nperseg, len(segment)))
 
-        # ✅ Dynamic PSD
-        for start in range(0, len(ch_data) - window_size + 1, step_size):
-            segment = ch_data[start:start+window_size]
-            f, Pxx = welch(segment, fs=fs, nperseg=min(window_size, len(segment)))
-            if freqs is None:
-                freqs = f
-            powers.append(Pxx)
-            times.append(start / fs)
+            freq_mask = (freqs >= freq_min) & (freqs <= freq_max)
+            psd_matrix.append(10 * np.log10(psd[freq_mask]))
+            time_points.append(start / fs)
 
-        if freqs is None or len(powers) == 0:
-            continue
+        psd_matrix = np.array(psd_matrix).T
+        psd_all.append((freqs[freq_mask], time_points, psd_matrix))
 
-        powers = np.array(powers).T  # freq x time
-
-        # ✅ ตรวจสอบความถี่ที่อยู่ในช่วง
-        band_mask = (freqs >= freq_band[0]) & (freqs <= freq_band[1])
-        if not np.any(band_mask):
-            continue
-
-        band_powers = powers[band_mask, :]
-        mean_power = band_powers.mean(axis=1)
-
-        # ✅ คำนวณ baseline
-        f_base, Pxx_base = welch(base_data[:window_size], fs=fs, nperseg=min(window_size, len(base_data)))
-        base_mask = (f_base >= freq_band[0]) & (f_base <= freq_band[1])
-
-        if np.any(base_mask):
-            base_power = Pxx_base[base_mask].mean()
-        else:
-            base_power = 0  # ถ้าไม่มีค่าช่วงนี้ ให้ baseline = 0
-
-        # ✅ หาความถี่ที่มี power สูงสุด
-        max_idx = np.argmax(mean_power)
-        max_freq = freqs[band_mask][max_idx]
-
-        if base_power > 0 and mean_power[max_idx] > base_power * threshold_multiplier:
-            exceed_channels.append(f"Ch{ch+1}")
-
-        results[f"Ch{ch+1}"] = max_freq
-
-        if powers.size == 0 or len(times) == 0 or freqs is None:
-            ax.set_title(f"Ch{ch+1} Dynamic PSD (No Data)")
-            continue
-
-        # ✅ Plot Dynamic PSD
-        powers = np.array(powers).T
-        pcm = ax.pcolormesh(times, freqs, powers, shading='gouraud')
-        fig = ax.get_figure()
-        fig.colorbar(pcm, ax=ax, label='Power')
-        ax.set_ylabel('Freq [Hz]')
-        ax.set_xlabel('Time [sec]')
-        ax.set_title(f'Ch{ch+1} Dynamic PSD')
-
-    return results, exceed_channels
+        max_power = psd_matrix.mean(axis=1)
+        max_freq = freqs[freq_mask][np.argmax(max_power)]
+        max_freqs.append((channel_labels[ch_idx], max_freq))
+    
+    return psd_all, max_freqs
